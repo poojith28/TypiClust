@@ -33,4 +33,5 @@ scratch*
 output/
 *.ipynb_checkpoints/
 data/
+scan/datasets/
 scan/results/

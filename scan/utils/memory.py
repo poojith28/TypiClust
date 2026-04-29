@@ -46,13 +46,26 @@ class MemoryBank(object):
 
     def mine_nearest_neighbors(self, topk, calculate_accuracy=True):
         # mine the topk nearest neighbors for every sample
-        import faiss
         features = self.features.cpu().numpy()
         n, dim = features.shape[0], features.shape[1]
+        try:
+            import faiss
+        except Exception as exc:
+            raise RuntimeError(
+                "FAISS is required for nearest-neighbor mining in SCAN/SimCLR. "
+                "Install faiss-cpu or faiss-gpu in the active environment."
+            ) from exc
+
         index = faiss.IndexFlatIP(dim)
-        index = faiss.index_cpu_to_all_gpus(index)
+        try:
+            index = faiss.index_cpu_to_all_gpus(index)
+            backend = "faiss_gpu"
+        except Exception as exc:
+            print(f"[MemoryBank] GPU FAISS unavailable, falling back to CPU FAISS. Reason: {exc}")
+            backend = "faiss_cpu"
         index.add(features)
         distances, indices = index.search(features, topk+1) # Sample itself is included
+        print(f"[MemoryBank] nearest-neighbor backend: {backend}")
         
         # evaluate 
         if calculate_accuracy:

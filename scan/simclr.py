@@ -131,6 +131,9 @@ def main():
         indices, acc = memory_bank_base.mine_nearest_neighbors(topk)
         np.save(p['topk_neighbors_train_path'], indices)
         np.save(p['pretext_features'], memory_bank_base.pre_lasts.cpu().numpy())
+
+        # Keep validation/test features in sync with the current checkpoint.
+        fill_memory_bank(val_dataloader, model, memory_bank_val)
         np.save(p['pretext_features'].replace('features', 'test_features'), memory_bank_val.pre_lasts.cpu().numpy())
 
     # Save final model
@@ -145,9 +148,8 @@ def main():
     indices, acc = memory_bank_base.mine_nearest_neighbors(topk)
     print('Accuracy of top-%d nearest neighbors on train set is %.2f' %(topk, 100*acc))
     np.save(p['topk_neighbors_train_path'], indices)
-    # save features
+    # save train features
     np.save(p['pretext_features'], memory_bank_base.pre_lasts.cpu().numpy())
-    np.save(p['pretext_features'].replace('features', 'test_features'), memory_bank_val.pre_lasts.cpu().numpy())
 
    
     # Mine the topk nearest neighbors at the very end (Val)
@@ -159,6 +161,7 @@ def main():
     indices, acc = memory_bank_val.mine_nearest_neighbors(topk)
     print('Accuracy of top-%d nearest neighbors on val set is %.2f' %(topk, 100*acc))
     np.save(p['topk_neighbors_val_path'], indices)   
+    np.save(p['pretext_features'].replace('features', 'test_features'), memory_bank_val.pre_lasts.cpu().numpy())
 
  
 if __name__ == '__main__':

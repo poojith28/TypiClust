@@ -12,6 +12,38 @@ The codebase currently only supports single-machine single-gpu training. We will
 
 Please see [`GETTING_STARTED`](docs/GETTING_STARTED.md) for brief instructions on installation, adding new datasets, basic usage examples, etc.
 
+### GeometryAutoResearch Example
+
+```bash
+cd /scratch/s219110279/TypiClust/deep-al
+python tools/train_al.py \
+  --cfg configs/cifar10/al/RESNET18.yaml \
+  --exp-name cifar10_geoar_demo \
+  --al geometry_auto_research \
+  --budget 1000 \
+  --initial_size 1000 \
+  --seed 1
+```
+
+To tune the prototype, set `ACTIVE_LEARNING.GEOAR_*` values in the config file, for example `GEOAR_ALPHA`, `GEOAR_BETA`, `GEOAR_GAMMA`, `GEOAR_K_ID`, `GEOAR_K_KNN`, `GEOAR_MODE`, `GEOAR_GRAPH_MODE`, `GEOAR_RADIUS`, and `GEOAR_LOG_CSV`.
+
+### IDProbCover Example
+
+```bash
+cd /scratch/s219110279/TypiClust/deep-al
+python tools/train_al.py \
+  --cfg configs/cifar100/al/RESNET18.yaml \
+  --exp-name cifar100_idprobcover_demo \
+  --al id_prob_cover \
+  --budget 50 \
+  --initial_size 50 \
+  --initial_delta 0.25 \
+  --seed 1
+```
+
+Tune `ACTIVE_LEARNING.IDPC_*` values in the config file for the intrinsic-dimension variant:
+`IDPC_K_ID`, `IDPC_K_KNN`, `IDPC_ALPHA`, `IDPC_EPS`, and `IDPC_LOG_CSV`.
+
 ## Active Learning Methods Supported
 * Uncertainty Sampling
   * Least Confidence
@@ -22,6 +54,8 @@ Please see [`GETTING_STARTED`](docs/GETTING_STARTED.md) for brief instructions o
 * Diversity Sampling 
   * Coreset (greedy) [2]
   * Variational Adversarial Active Learning (VAAL) [3]
+  * ProbCover / IDProbCover
+  * GeometryAutoResearch
 * Query-by-Committee Sampling
   * Ensemble Variation Ratio (Ens-varR) [4]
 

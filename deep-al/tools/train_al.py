@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import time
 from datetime import datetime
 import argparse
 import numpy as np
@@ -8,12 +10,13 @@ import torch
 from copy import deepcopy
 
 # local
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def add_path(path):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-add_path(os.path.abspath('..'))
+add_path(os.path.abspath(os.path.join(_THIS_DIR, '..')))
 
 from pycls.al.ActiveLearning import ActiveLearning
 import pycls.core.builders as model_builder
@@ -42,6 +45,145 @@ plot_it_y_values = []
 
 delta_avg_lst = []
 delta_std_lst = []
+ADAPTIVE_COVER_METHODS = {
+    'prob_cover',
+    'probcover',
+    'id_prob_cover',
+    'idprobcover',
+    'idprobcover_tiebreak_min_id',
+    'idprobcover_minid_tiebreak',
+    'idprobcover_tiebreak_random',
+    'idprobcover_random_tiebreak',
+    'idprobcover_tiebreak_first_max',
+    'idprobcover_firstmax_tiebreak',
+    'knn_distance_cover',
+    'adaptive_knn_distance_cover',
+    'density_cover',
+    'adaptive_density_cover',
+    'distance_variance_cover',
+    'adaptive_distance_variance_cover',
+    'distance_cv_cover',
+    'adaptive_distance_cv_cover',
+}
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return value
+
+
+def _mean_or_zero(values):
+    if not values:
+        return 0.0
+    return float(np.mean(values))
+
+
+def _median_or_zero(values):
+    if not values:
+        return 0.0
+    return float(np.median(values))
+
+
+def _timing_summary(episode_records, initial_sampling_record=None):
+    timing_records = []
+    for record in episode_records:
+        timing = record.get('timing', {})
+        if timing.get('has_sampling', False):
+            timing_records.append(timing)
+
+    initial_sampling_record = initial_sampling_record or {}
+    initial_sampling_time = float(initial_sampling_record.get('acquisition_time_sec', 0.0) or 0.0)
+    acquisition_times = [float(item.get('acquisition_time_sec', 0.0)) for item in timing_records]
+    train_times = [float(item.get('train_time_sec', 0.0)) for item in timing_records]
+    test_times = [float(item.get('test_time_sec', 0.0)) for item in timing_records]
+    round_times = [float(item.get('round_time_sec', 0.0)) for item in timing_records]
+    cumulative_acquisition = float(np.sum(acquisition_times)) if acquisition_times else 0.0
+    cumulative_round = float(np.sum(round_times)) if round_times else 0.0
+
+    return {
+        'sampled_rounds': int(len(timing_records)),
+        'initial_sampling_time_sec': initial_sampling_time,
+        'initial_sampling_recorded': bool(initial_sampling_record),
+        'acquisition_time_sec': {
+            'mean': _mean_or_zero(acquisition_times),
+            'median': _median_or_zero(acquisition_times),
+            'cumulative': cumulative_acquisition,
+            'cumulative_with_initial_sampling': cumulative_acquisition + initial_sampling_time,
+        },
+        'train_time_sec': {
+            'mean': _mean_or_zero(train_times),
+            'median': _median_or_zero(train_times),
+            'cumulative': float(np.sum(train_times)) if train_times else 0.0,
+        },
+        'test_time_sec': {
+            'mean': _mean_or_zero(test_times),
+            'median': _median_or_zero(test_times),
+            'cumulative': float(np.sum(test_times)) if test_times else 0.0,
+        },
+        'round_time_sec': {
+            'mean': _mean_or_zero(round_times),
+            'median': _median_or_zero(round_times),
+            'cumulative': cumulative_round,
+            'cumulative_with_initial_sampling': cumulative_round + initial_sampling_time,
+        },
+    }
+
+
+def write_benchmark_summary(cfg, episode_records, initial_sampling_record=None):
+    summary_path = os.path.join(cfg.EXP_DIR, 'benchmark_summary.json')
+    final_record = episode_records[-1] if episode_records else {}
+    test_curve = [float(record.get('test_accuracy', 0.0)) for record in episode_records]
+    val_curve = [float(record.get('best_val_accuracy', 0.0)) for record in episode_records]
+    summary = {
+        'primary_metric_name': 'final_val_accuracy',
+        'primary_metric': float(final_record.get('best_val_accuracy', 0.0)),
+        'final_val_accuracy': float(final_record.get('best_val_accuracy', 0.0)),
+        'final_test_accuracy': float(final_record.get('test_accuracy', 0.0)),
+        'val_auc': _mean_or_zero(val_curve),
+        'test_auc': _mean_or_zero(test_curve),
+        'balanced_accuracy': 'not_available',
+        'macro_f1': 'not_available',
+        'sampling_fn': cfg.ACTIVE_LEARNING.SAMPLING_FN,
+        'budget_per_round': int(cfg.ACTIVE_LEARNING.BUDGET_SIZE),
+        'num_rounds_completed': int(len(episode_records)),
+        'dataset': cfg.DATASET.NAME,
+        'model': cfg.MODEL.TYPE,
+        'seed': int(cfg.RNG_SEED),
+        'exp_name': cfg.EXP_NAME,
+        'exp_dir': cfg.EXP_DIR,
+        'timing': _timing_summary(episode_records, initial_sampling_record=initial_sampling_record),
+        'initial_sampling': initial_sampling_record or {},
+        'episode_records': episode_records,
+    }
+    with open(summary_path, 'w') as handle:
+        json.dump(summary, handle, indent=2)
+    return summary_path
+
+
+def get_probcover_delta(base_delta, labeled_count):
+    base_delta = float(base_delta)
+    if labeled_count == 0:
+        phase = 'cold_start'
+        scale = 1.35
+    else:
+        phase = 'post_label_shrink'
+        scale = 0.85
+    return base_delta * scale, phase, scale
+
+
+def apply_probcover_delta(cfg, base_delta, labeled_count, logger_obj=None):
+    effective_delta, phase, scale = get_probcover_delta(base_delta, labeled_count)
+    cfg.ACTIVE_LEARNING.INITIAL_DELTA = effective_delta
+    message = (
+        'ProbCover adaptive delta: base={:.4f}, effective={:.4f}, scale={:.2f}, '
+        'phase={}, labeled_count={}'
+    ).format(base_delta, effective_delta, scale, phase, labeled_count)
+    print(message)
+    if logger_obj is not None:
+        logger_obj.info(message)
+    return effective_delta, phase, scale
 
 
 def str2bool(v):
@@ -66,6 +208,18 @@ def argparser():
     parser.add_argument('--finetune', help='Whether to continue with existing model between rounds', type=str2bool, default=False)
     parser.add_argument('--linear_from_features', help='Whether to use a linear layer from self-supervised features', action='store_true')
     parser.add_argument('--initial_delta', help='Relevant only for ProbCover and DCoM', default=0.6, type=float)
+    parser.add_argument('--idpc_alpha', help='IDProbCover radius adaptation strength', default=None, type=float)
+    parser.add_argument('--idpc_mode', help='IDProbCover radius adaptation mode', default=None, type=str)
+    parser.add_argument('--idpc_k_id', help='IDProbCover neighbors for local ID estimation', default=None, type=int)
+    parser.add_argument('--idpc_k_knn', help='IDProbCover neighbors for coverage graph construction', default=None, type=int)
+    parser.add_argument('--idpc_eps', help='IDProbCover numerical stability epsilon', default=None, type=float)
+    parser.add_argument('--idpc_log_csv', help='Optional CSV path for IDProbCover diagnostics', default=None, type=str)
+    parser.add_argument('--idpc_cache_root', help='Optional cache root reserved for IDProbCover artifacts', default=None, type=str)
+    parser.add_argument('--arc_alpha', help='Adaptive-cover radius scaling strength', default=None, type=float)
+    parser.add_argument('--arc_k_signal', help='Adaptive-cover neighbors for local scaling signal estimation', default=None, type=int)
+    parser.add_argument('--arc_k_knn', help='Adaptive-cover neighbors for coverage graph construction', default=None, type=int)
+    parser.add_argument('--arc_eps', help='Adaptive-cover numerical stability epsilon', default=None, type=float)
+    parser.add_argument('--arc_cache_root', help='Optional cache root for adaptive-cover artifacts', default=None, type=str)
     parser.add_argument('--k_logistic', default=50, type=int)
     parser.add_argument('--a_logistic', default=0.8, type=float)
 
@@ -89,6 +243,8 @@ def main(cfg):
     # Auto assign a RNG_SEED when not supplied a value
     if cfg.RNG_SEED is None:
         cfg.RNG_SEED = np.random.randint(100)
+
+    probcover_base_delta = float(cfg.ACTIVE_LEARNING.INITIAL_DELTA)
 
     # Using specific GPU
     # os.environ['NVIDIA_VISIBLE_DEVICES'] = str(cfg.GPU_ID)
@@ -147,6 +303,8 @@ def main(cfg):
             uSetPath=cfg.ACTIVE_LEARNING.USET_PATH, valSetPath = cfg.ACTIVE_LEARNING.VALSET_PATH)
     model = model_builder.build_model(cfg).cuda()
 
+    initial_sampling_record = {}
+
     if len(lSet) == 0:
         if cfg.ACTIVE_LEARNING.SAMPLING_FN.lower() in ['dcom']:
             print('Labeled Set is Empty - Create and save the first delta values list')
@@ -155,14 +313,41 @@ def main(cfg):
             delta_avg_lst.append(cfg.ACTIVE_LEARNING.INITIAL_DELTA)
 
         print('Labeled Set is Empty - Sampling an Initial Pool')
+        if cfg.ACTIVE_LEARNING.SAMPLING_FN.lower() in ADAPTIVE_COVER_METHODS:
+            apply_probcover_delta(cfg, probcover_base_delta, len(lSet))
         al_obj = ActiveLearning(data_obj, cfg)
+        initial_acquisition_start = time.time()
         activeSet, new_uSet = al_obj.sample_from_uSet(model, lSet, uSet, train_data)
+        initial_acquisition_time_sec = time.time() - initial_acquisition_start
+        initial_sampling_metadata = getattr(al_obj, 'latest_sampling_metadata', {})
+        initial_sampling_record = {
+            'stage': 'initial_pool_sampling',
+            'seed': int(cfg.RNG_SEED),
+            'sampling_fn': cfg.ACTIVE_LEARNING.SAMPLING_FN,
+            'labeled_count_before_sampling': int(len(lSet)),
+            'unlabeled_count_before_sampling': int(len(uSet)),
+            'labeled_count_after_sampling': int(len(lSet) + len(activeSet)),
+            'unlabeled_count_after_sampling': int(len(new_uSet)),
+            'active_set_size': int(len(activeSet)),
+            'acquisition_time_sec': float(initial_acquisition_time_sec),
+            'timing': {
+                'acquisition_time_sec': float(initial_acquisition_time_sec),
+                'has_sampling': True,
+                'is_initial_pool_sampling': True,
+            },
+            'sampling_metadata': {
+                key: _safe_float(value) if not isinstance(value, (dict, list)) else value
+                for key, value in initial_sampling_metadata.items()
+            },
+        }
+        with open(os.path.join(cfg.EXP_DIR, 'initial_sampling_summary.json'), 'w') as handle:
+            json.dump(initial_sampling_record, handle, indent=2)
         print(f'Initial Pool is {activeSet}')
         # Save current lSet, new_uSet and activeSet in the episode directory
         # data_obj.saveSets(lSet, uSet, activeSet, cfg.EPISODE_DIR)
         # Add activeSet to lSet, save new_uSet as uSet and update dataloader for the next episode
-        lSet = np.append(lSet, activeSet)
-        uSet = new_uSet
+        lSet = np.append(lSet, activeSet).astype(np.int64, copy=False)
+        uSet = np.asarray(new_uSet, dtype=np.int64)
 
     print("Data Partitioning Complete. \nLabeled Set: {}, Unlabeled Set: {}, Validation Set: {}\n".format(len(lSet), len(uSet), len(valSet)))
     logger.info("Labeled Set: {}, Unlabeled Set: {}, Validation Set: {}\n".format(len(lSet), len(uSet), len(valSet)))
@@ -187,6 +372,7 @@ def main(cfg):
 
     print("AL Query Method: {}\nMax AL Episodes: {}\n".format(cfg.ACTIVE_LEARNING.SAMPLING_FN, cfg.ACTIVE_LEARNING.MAX_ITER))
     logger.info("AL Query Method: {}\nMax AL Episodes: {}\n".format(cfg.ACTIVE_LEARNING.SAMPLING_FN, cfg.ACTIVE_LEARNING.MAX_ITER))
+    episode_records = []
 
     for cur_episode in range(0, cfg.ACTIVE_LEARNING.MAX_ITER+1):
 
@@ -202,8 +388,9 @@ def main(cfg):
         # Train model
         print("======== TRAINING ========")
         logger.info("======== TRAINING ========")
-
+        train_start = time.time()
         best_val_acc, best_val_epoch, checkpoint_file = train_model(lSet_loader, valSet_loader, model, optimizer, cfg)
+        train_time_sec = time.time() - train_start
 
         print("Best Validation Accuracy: {}\nBest Epoch: {}\n".format(round(best_val_acc, 4), best_val_epoch))
         logger.info("EPISODE {} Best Validation Accuracy: {}\tBest Epoch: {}\n".format(cur_episode, round(best_val_acc, 4), best_val_epoch))
@@ -211,15 +398,46 @@ def main(cfg):
         # Test best model checkpoint
         print("======== TESTING ========\n")
         logger.info("======== TESTING ========\n")
+        test_start = time.time()
         test_acc = test_model(test_loader, checkpoint_file, cfg, cur_episode)
+        test_time_sec = time.time() - test_start
         print("Test Accuracy: {}.\n".format(round(test_acc, 4)))
         logger.info("EPISODE {} Test Accuracy {}.\n".format(cur_episode, test_acc))
+        episode_record = {
+            'episode': int(cur_episode),
+            'seed': int(cfg.RNG_SEED),
+            'exp_name': cfg.EXP_NAME,
+            'best_val_accuracy': float(best_val_acc),
+            'best_val_epoch': int(best_val_epoch),
+            'test_accuracy': float(test_acc),
+            'labeled_count_before_sampling': int(len(lSet)),
+            'unlabeled_count_before_sampling': int(len(uSet)),
+            'sampling_fn': cfg.ACTIVE_LEARNING.SAMPLING_FN,
+            'train_time_sec': float(train_time_sec),
+            'test_time_sec': float(test_time_sec),
+        }
 
         # No need to perform active sampling in the last episode iteration
         if cur_episode == cfg.ACTIVE_LEARNING.MAX_ITER:
             # Save current lSet, uSet in the final episode directory
             data_obj.saveSet(lSet, 'lSet', cfg.EPISODE_DIR)
             data_obj.saveSet(uSet, 'uSet', cfg.EPISODE_DIR)
+            episode_record.update({
+                'labeled_count_after_sampling': int(len(lSet)),
+                'unlabeled_count_after_sampling': int(len(uSet)),
+                'active_set_size': 0,
+                'acquisition_time_sec': 0.0,
+                'round_time_sec': float(train_time_sec + test_time_sec),
+                'timing': {
+                    'train_time_sec': float(train_time_sec),
+                    'test_time_sec': float(test_time_sec),
+                    'acquisition_time_sec': 0.0,
+                    'round_time_sec': float(train_time_sec + test_time_sec),
+                    'has_sampling': False,
+                },
+                'sampling_metadata': {'selection_mode': 'final_evaluation_only'},
+            })
+            episode_records.append(episode_record)
             break
 
         # DCoM's delta-s updating
@@ -250,17 +468,117 @@ def main(cfg):
         # Active Sample 
         print("======== ACTIVE SAMPLING ========\n")
         logger.info("======== ACTIVE SAMPLING ========\n")
+        if cfg.ACTIVE_LEARNING.SAMPLING_FN.lower() in ADAPTIVE_COVER_METHODS:
+            apply_probcover_delta(cfg, probcover_base_delta, len(lSet), logger_obj=logger)
         al_obj = ActiveLearning(data_obj, cfg)
         clf_model = model_builder.build_model(cfg)
         clf_model = cu.load_checkpoint(checkpoint_file, clf_model)
+        acquisition_start = time.time()
         activeSet, new_uSet = al_obj.sample_from_uSet(clf_model, lSet, uSet, train_data)
+        acquisition_time_sec = time.time() - acquisition_start
+        sampling_metadata = getattr(al_obj, 'latest_sampling_metadata', {})
+        if cfg.ACTIVE_LEARNING.SAMPLING_FN.lower() in ADAPTIVE_COVER_METHODS:
+            print(
+                'Coverage selection metadata: active={} (mode={}, variant={}, delta={:.4f}, phase={}, bald_mean={:.4f}, bald_max={:.4f}, variance_mean={:.4f}, variance_max={:.4f}, dropout_iters={}, cover_anchors={}, diversity_lambda={:.2f}, selected_id_mean={:.4f}, selected_signal_mean={:.4f}, selected_radius_mean={:.4f}, k_id={}, k_knn={}, alpha={:.2f})'.format(
+                    sampling_metadata.get('boundary_scores_active', False),
+                    sampling_metadata.get('selection_mode', 'unknown'),
+                    sampling_metadata.get('boundary_variant', 'unknown'),
+                    sampling_metadata.get('effective_delta', 0.0),
+                    sampling_metadata.get('delta_phase', 'unknown'),
+                    sampling_metadata.get('epistemic_bald_mean', 0.0),
+                    sampling_metadata.get('epistemic_bald_max', 0.0),
+                    sampling_metadata.get('predictive_variance_mean', 0.0),
+                    sampling_metadata.get('predictive_variance_max', 0.0),
+                    sampling_metadata.get('dropout_iterations', 0),
+                    sampling_metadata.get('cover_anchor_count', 0),
+                    sampling_metadata.get('diversity_lambda', 0.0),
+                    sampling_metadata.get('selected_id_mean', 0.0),
+                    sampling_metadata.get('selected_signal_mean', 0.0),
+                    sampling_metadata.get('selected_radius_mean', 0.0),
+                    sampling_metadata.get('k_id', sampling_metadata.get('k_signal', 0)),
+                    sampling_metadata.get('k_knn', 0),
+                    sampling_metadata.get('alpha', 0.0),
+                )
+            )
+            logger.info(
+                'Coverage selection metadata: active={} (mode={}, variant={}, delta={:.4f}, phase={}, bald_mean={:.4f}, bald_max={:.4f}, variance_mean={:.4f}, variance_max={:.4f}, dropout_iters={}, cover_anchors={}, diversity_lambda={:.2f}, selected_id_mean={:.4f}, selected_signal_mean={:.4f}, selected_radius_mean={:.4f}, k_id={}, k_knn={}, alpha={:.2f})'.format(
+                    sampling_metadata.get('boundary_scores_active', False),
+                    sampling_metadata.get('selection_mode', 'unknown'),
+                    sampling_metadata.get('boundary_variant', 'unknown'),
+                    sampling_metadata.get('effective_delta', 0.0),
+                    sampling_metadata.get('delta_phase', 'unknown'),
+                    sampling_metadata.get('epistemic_bald_mean', 0.0),
+                    sampling_metadata.get('epistemic_bald_max', 0.0),
+                    sampling_metadata.get('predictive_variance_mean', 0.0),
+                    sampling_metadata.get('predictive_variance_max', 0.0),
+                    sampling_metadata.get('dropout_iterations', 0),
+                    sampling_metadata.get('cover_anchor_count', 0),
+                    sampling_metadata.get('diversity_lambda', 0.0),
+                    sampling_metadata.get('selected_id_mean', 0.0),
+                    sampling_metadata.get('selected_signal_mean', 0.0),
+                    sampling_metadata.get('selected_radius_mean', 0.0),
+                    sampling_metadata.get('k_id', sampling_metadata.get('k_signal', 0)),
+                    sampling_metadata.get('k_knn', 0),
+                    sampling_metadata.get('alpha', 0.0),
+                )
+            )
+
+        if cfg.ACTIVE_LEARNING.SAMPLING_FN.lower() in ['geometry_auto_research', 'geoar']:
+            print(
+                'GeometryAutoResearch metadata: graph_mode={} radius={} uncertainty_mode={} uncertainty_active={} components={} selected_id_mean={:.4f} selected_coverage_gain_mean={:.4f} selected_uncertainty_mean={:.4f} selected_score_mean={:.4f}'.format(
+                    sampling_metadata.get('graph_mode', 'unknown'),
+                    sampling_metadata.get('radius', None),
+                    sampling_metadata.get('uncertainty_mode', 'unknown'),
+                    sampling_metadata.get('uncertainty_active', False),
+                    sampling_metadata.get('components', 0),
+                    sampling_metadata.get('selected_id_mean', 0.0),
+                    sampling_metadata.get('selected_coverage_gain_mean', 0.0),
+                    sampling_metadata.get('selected_uncertainty_mean', 0.0),
+                    sampling_metadata.get('selected_score_mean', 0.0),
+                )
+            )
+            logger.info(
+                'GeometryAutoResearch metadata: graph_mode={} radius={} uncertainty_mode={} uncertainty_active={} components={} selected_id_mean={:.4f} selected_coverage_gain_mean={:.4f} selected_uncertainty_mean={:.4f} selected_score_mean={:.4f}'.format(
+                    sampling_metadata.get('graph_mode', 'unknown'),
+                    sampling_metadata.get('radius', None),
+                    sampling_metadata.get('uncertainty_mode', 'unknown'),
+                    sampling_metadata.get('uncertainty_active', False),
+                    sampling_metadata.get('components', 0),
+                    sampling_metadata.get('selected_id_mean', 0.0),
+                    sampling_metadata.get('selected_coverage_gain_mean', 0.0),
+                    sampling_metadata.get('selected_uncertainty_mean', 0.0),
+                    sampling_metadata.get('selected_score_mean', 0.0),
+                )
+            )
 
         # Save current lSet, new_uSet and activeSet in the episode directory
         data_obj.saveSets(lSet, uSet, activeSet, cfg.EPISODE_DIR)
 
         # Add activeSet to lSet, save new_uSet as uSet and update dataloader for the next episode
-        lSet = np.append(lSet, activeSet)
-        uSet = new_uSet
+        lSet = np.append(lSet, activeSet).astype(np.int64, copy=False)
+        uSet = np.asarray(new_uSet, dtype=np.int64)
+        episode_record.update({
+            'labeled_count_after_sampling': int(len(lSet)),
+            'unlabeled_count_after_sampling': int(len(uSet)),
+            'active_set_size': int(len(activeSet)),
+            'acquisition_time_sec': float(acquisition_time_sec),
+            'round_time_sec': float(train_time_sec + test_time_sec + acquisition_time_sec),
+            'active_set_ids': [int(idx) for idx in np.asarray(activeSet, dtype=np.int64).tolist()],
+            'timing': {
+                'train_time_sec': float(train_time_sec),
+                'test_time_sec': float(test_time_sec),
+                'acquisition_time_sec': float(acquisition_time_sec),
+                'round_time_sec': float(train_time_sec + test_time_sec + acquisition_time_sec),
+                'has_sampling': True,
+            },
+            'sampling_metadata': {
+                key: _safe_float(value) if not isinstance(value, (dict, list)) else value
+                for key, value in sampling_metadata.items()
+            },
+        })
+        episode_records.append(episode_record)
+        with open(os.path.join(cfg.EPISODE_DIR, 'episode_summary.json'), 'w') as handle:
+            json.dump(episode_record, handle, indent=2)
 
         lSet_loader = data_obj.getIndexesDataLoader(indexes=lSet, batch_size=cfg.TRAIN.BATCH_SIZE, data=train_data)
         valSet_loader = data_obj.getIndexesDataLoader(indexes=valSet, batch_size=cfg.TRAIN.BATCH_SIZE, data=train_data)
@@ -291,6 +609,8 @@ def main(cfg):
             print(optimizer.load_state_dict(opt_init_state))
 
         os.remove(checkpoint_file)
+
+    write_benchmark_summary(cfg, episode_records, initial_sampling_record=initial_sampling_record)
 
 
 
@@ -623,4 +943,28 @@ if __name__ == "__main__":
     cfg.MODEL.LINEAR_FROM_FEATURES = args.linear_from_features
     cfg.ACTIVE_LEARNING.A_LOGISTIC = args.a_logistic
     cfg.ACTIVE_LEARNING.K_LOGISTIC = args.k_logistic
+    if args.idpc_alpha is not None:
+        cfg.ACTIVE_LEARNING.IDPC_ALPHA = args.idpc_alpha
+    if args.idpc_mode is not None:
+        cfg.ACTIVE_LEARNING.IDPC_MODE = args.idpc_mode
+    if args.idpc_k_id is not None:
+        cfg.ACTIVE_LEARNING.IDPC_K_ID = args.idpc_k_id
+    if args.idpc_k_knn is not None:
+        cfg.ACTIVE_LEARNING.IDPC_K_KNN = args.idpc_k_knn
+    if args.idpc_eps is not None:
+        cfg.ACTIVE_LEARNING.IDPC_EPS = args.idpc_eps
+    if args.idpc_log_csv is not None:
+        cfg.ACTIVE_LEARNING.IDPC_LOG_CSV = args.idpc_log_csv
+    if args.idpc_cache_root is not None:
+        cfg.ACTIVE_LEARNING.IDPC_CACHE_ROOT = args.idpc_cache_root
+    if args.arc_alpha is not None:
+        cfg.ACTIVE_LEARNING.ARC_ALPHA = args.arc_alpha
+    if args.arc_k_signal is not None:
+        cfg.ACTIVE_LEARNING.ARC_K_SIGNAL = args.arc_k_signal
+    if args.arc_k_knn is not None:
+        cfg.ACTIVE_LEARNING.ARC_K_KNN = args.arc_k_knn
+    if args.arc_eps is not None:
+        cfg.ACTIVE_LEARNING.ARC_EPS = args.arc_eps
+    if args.arc_cache_root is not None:
+        cfg.ACTIVE_LEARNING.ARC_CACHE_ROOT = args.arc_cache_root
     main(cfg)

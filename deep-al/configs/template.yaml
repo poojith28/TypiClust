@@ -61,12 +61,43 @@ ACTIVE_LEARNING:
   # Active sampling budget (at each episode)
   BUDGET_SIZE: 5000
   # Active sampling method
-  SAMPLING_FN: 'dbal' # 'random', 'uncertainty', 'entropy', 'margin', 'bald', 'vaal', 'coreset', 'ensemble_var_R'
+  SAMPLING_FN: 'dbal' # 'random', 'uncertainty', 'entropy', 'margin', 'bald', 'vaal', 'coreset', 'ensemble_var_R', 'probcover', 'id_prob_cover', 'knn_distance_cover', 'density_cover', 'distance_variance_cover', 'distance_cv_cover', 'geometry_auto_research'
   # Initial labeled pool ratio (% of total train set that should be labeled before AL begins)
   INIT_L_RATIO: 0.1
   # Max AL episodes
   MAX_ITER: 1
   DROPOUT_ITERATIONS: 10 # Used by DBAL
+  GEOAR_ALPHA: 1.0
+  GEOAR_BETA: 1.0
+  GEOAR_GAMMA: 0.0
+  GEOAR_K_ID: 10
+  GEOAR_K_KNN: 20
+  GEOAR_MODE: 'zero' # 'high_id_more_weight', 'low_id_more_weight', 'zero'
+  GEOAR_RADIUS: 0.0
+  GEOAR_GRAPH_MODE: 'knn' # 'knn', 'radius', 'component', 'hybrid'
+  GEOAR_RECOMPUTE_GREEDY: True
+  GEOAR_LOG_CSV: 'geometry_auto_research_rounds.csv'
+  GEOAR_UNCERTAINTY: 'entropy' # 'entropy', 'margin', 'least_confidence'
+  IDPC_K_ID: 50
+  IDPC_K_KNN: 50
+  IDPC_ALPHA: 1.0
+  IDPC_MODE: 'high_id_more_centers'
+  IDPC_EPS: 1e-8
+  IDPC_LOG_CSV: 'id_probcover_rounds.csv'
+  IDPC_CACHE_ROOT: ''
+  IDPC_L2_NORMALIZE_FEATURES: True
+  IDPC_PREFER_FAISS: True
+  IDPC_FAISS_GPU: True
+  IDPC_ADD_SELF_COVER: True
+  ARC_K_SIGNAL: 50
+  ARC_K_KNN: 50
+  ARC_ALPHA: 1.0
+  ARC_EPS: 1e-8
+  ARC_CACHE_ROOT: ''
+  ARC_L2_NORMALIZE_FEATURES: True
+  ARC_PREFER_FAISS: True
+  ARC_FAISS_GPU: True
+  ARC_ADD_SELF_COVER: True
 # Useful when running `tools/ensemble_al.py` or `tools/ensemble_train.py`
 ENSEMBLE: 
   NUM_MODELS: 3

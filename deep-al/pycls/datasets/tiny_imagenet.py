@@ -6,6 +6,7 @@ import torch
 import torchvision.datasets as datasets
 
 from typing import Any
+import pycls.datasets.utils as ds_utils
 
 
 class TinyImageNet(datasets.ImageFolder):
@@ -49,9 +50,9 @@ class TinyImageNet(datasets.ImageFolder):
         # So a custom loading function is necessary
         self.only_features = only_features
         if self.split == 'train':
-            self.features = np.load('../../scan/results/tiny-imagenet/pretext/features_seed1.npy')
+            self.features = ds_utils.load_features("TINYIMAGENET", train=True, normalized=False)
         elif self.split == 'val':
-            self.features = np.load('../../scan/results/tiny-imagenet/pretext/test_features_seed1.npy')
+            self.features = ds_utils.load_features("TINYIMAGENET", train=False, normalized=False)
             self.root = root
             self.imgs, self.targets = self.load_val_data()
             self.samples = [(self.imgs[idx], self.targets[idx]) for idx in range(len(self.imgs))]
